@@ -1,8 +1,4 @@
-"""施法条：按时间推进、打断优先级、完成封顶。
-
-缺陷：进度按 tick 调用次数累加、弱打断能打断不可打断的法术、完成后还继续累加、
-打断后进度没清零、查询全表扫描。
-"""
+"""施法条：按时间推进、打断优先级、完成封顶。"""
 
 
 class CastError(ValueError):
@@ -13,24 +9,47 @@ class Cast:
     """一次施法。"""
 
     def __init__(self, spell, duration_ms, interruptible=True):
+        if duration_ms <= 0:
+            raise CastError("duration_ms 必须为正数")
         self.spell = spell
         self.duration_ms = duration_ms
         self.interruptible = interruptible
-        self.ticks = 0
+        self.start_ms = 0
+        self.interrupted = False
+
+    def start(self, now_ms):
+        """记下开始时刻。"""
+        self.start_ms = now_ms
         self.interrupted = False
 
     def tick(self):
-        """推进一帧。缺陷：每调用一次就算 100ms 的进度。"""
-        self.ticks += 1
+        """兼容旧接口：进度只取决于真实时间，与帧/tick 无关。"""
 
     def progress(self, now_ms):
-        """进度千分比。缺陷：按 tick 次数算（帧率一变结果就变），也不封顶。"""
-        return self.ticks * 100
+        """进度千分比：按真实时间计算，打断后为 0，完成封顶 1000。"""
+        if self.interrupted:
+            return 0
+        elapsed = now_ms - self.start_ms
+        if elapsed <= 0:
+            return 0
+        return min(1000, elapsed * 1000 // self.duration_ms)
 
     def interrupt(self, kind, now_ms):
-        """打断施法。缺陷：弱打断也能打断不可打断的法术，而且打断后进度没清零。"""
-        self.interrupted = True
-        return True
+        """打断施法。strong 能打断任何施法；weak 只能打断可打断的施法。
+
+        成功返回 True 并清零进度；失败返回 False 且不改状态。
+        """
+        if self.interrupted:
+            return False
+        if kind == "strong":
+            self.interrupted = True
+            return True
+        if kind == "weak":
+            if self.interruptible:
+                self.interrupted = True
+                return True
+            return False
+        raise CastError("未知打断类型: %r" % (kind,))
 
 
 class Caster:
@@ -41,12 +60,13 @@ class Caster:
         self.scanned = 0
 
     def start(self, cast, now_ms=0):
-        """开始施法。缺陷：记不下开始时刻，只能靠外部 tick 推进。"""
+        """开始施法并记下开始时刻。"""
+        cast.start(now_ms)
         self.casts[cast.spell] = cast
 
     def find(self, spell):
-        """缺陷：每次查询全表扫描。"""
-        self.scanned += len(self.casts)
+        """按法术名 O(1) 查询。"""
+        self.scanned += 1
         return self.casts.get(spell)
 
     def scanned_count(self):
